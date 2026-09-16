@@ -10,9 +10,6 @@ const Allocator = std.mem.Allocator;
 const Dir = Io.Dir;
 
 pub const Iskra = struct {
-    pub const IssueCloseError = error{AlreadyClosed};
-    pub const IssueOpenError = error{AlreadyOpened};
-
     repo_dir: Dir,
     iskra_dir: Dir,
     io: Io,
@@ -23,7 +20,8 @@ pub const Iskra = struct {
         io: Io,
         allocator: Allocator,
     ) !@This() {
-        const iskra_dir = try repo_dir.createDirPathOpen(io, "iskra", .{});
+        repo_dir.createDir(io, "iskra", .default_dir) catch {};
+        const iskra_dir = try repo_dir.openDir(io, "iskra", .{ .iterate = true });
 
         return .{
             .repo_dir = repo_dir,
@@ -34,10 +32,10 @@ pub const Iskra = struct {
     }
 
     pub fn deinit(self: *@This()) void {
-        self.iskra_dir.close();
+        self.iskra_dir.close(self.io);
     }
 
-    pub fn issue_read_state(self: *const @This(), id: []const u8) !issue.Issue {
+    pub fn issueReadState(self: *const @This(), id: []const u8) !issue.IssueState {
         const issue_dir = try self.iskra_dir.createDirPathOpen(self.io, id, .{});
         defer issue_dir.close(self.io);
 
@@ -54,16 +52,23 @@ pub const Iskra = struct {
 
         _ = try file_reader.interface.readSliceShort(buffer);
 
-        return try zon.parse.fromSlice(
-            issue.Issue,
+        var diag: zon.parse.Diagnostics = .{};
+        defer diag.deinit(self.allocator);
+
+        const state = zon.parse.fromSlice(
+            issue.IssueState,
             self.allocator,
             buffer[0 .. buffer.len - 1 :0],
-            null,
-            .{},
-        );
+            &diag,
+            .{ .ignore_unknown_fields = true },
+        ) catch |e| {
+            return e;
+        };
+
+        return state;
     }
 
-    pub fn issue_write_state(self: *const @This(), id: []const u8, state: issue.Issue) !void {
+    pub fn issueWriteState(self: *const @This(), id: []const u8, state: issue.IssueState) !void {
         const issue_dir = try self.iskra_dir.createDirPathOpen(self.io, id, .{});
         defer issue_dir.close(self.io);
 
@@ -80,27 +85,56 @@ pub const Iskra = struct {
         try writer.flush();
     }
 
-    pub fn issue_close(self: *const @This(), id: []const u8) !void {
-        var state = try self.issue_read_state(id);
-        if (state.state == .closed) {
-            return IssueCloseError.AlreadyClosed;
-        }
+    pub fn issueOpen(self: *const @This(), id: []const u8) !void {
+        var state = try self.issueReadState(id);
 
-        state.state = .closed;
-        try self.issue_write_state(id, state);
+        state.status = .open;
+        try self.issueWriteState(id, state);
     }
 
-    pub fn issue_open(self: *const @This(), id: []const u8) !void {
-        var state = try self.issue_read_state(id);
-        if (state.state == .open) {
-            return IssueOpenError.AlreadyOpened;
-        }
+    pub fn issueClose(self: *const @This(), id: []const u8) !void {
+        var state = try self.issueReadState(id);
 
-        state.state = .open;
-        try self.issue_write_state(id, state);
+        state.status = .closed;
+        try self.issueWriteState(id, state);
     }
 
-    pub fn issue_new(self: *const @This()) !void {
+    pub fn issueResolve(self: *const @This(), id: []const u8) !void {
+        var state = try self.issueReadState(id);
+
+        state.status = .resolved;
+        try self.issueWriteState(id, state);
+    }
+
+    fn issueGrepDir(self: *const @This(), id: []const u8, text: []const u8) !void {
+        const issue_dir = try self.iskra_dir.openDir(self.io, id, .{});
+        defer issue_dir.close(self.io);
+
+        const issue_file = try issue_dir.openFile(self.io, "ISSUE.md", .{});
+        defer issue_file.close(self.io);
+
+        const length = try issue_file.length(self.io);
+        const buffer = try self.allocator.alloc(u8, length);
+        defer self.allocator.free(buffer);
+
+        _ = try issue_file.readPositionalAll(self.io, buffer, 0);
+
+        if (std.mem.indexOf(u8, buffer, text)) |index| {
+            std.log.info("./iskra/{s}/ISSUE.md: {}", .{ id, index });
+        }
+    }
+
+    pub fn issueGrep(self: *const @This(), text: []const u8) !void {
+        var iterator = self.iskra_dir.iterate();
+        while (try iterator.next(self.io)) |it| {
+            if (it.kind != .directory) continue;
+            self.issueGrepDir(it.name, text) catch |e| {
+                std.log.err("Error grepping issue {s}: {}", .{ it.name, e });
+            };
+        }
+    }
+
+    pub fn issueNew(self: *const @This()) !void {
         var id_buf = std.mem.zeroes([64]u8);
         const id = try uid.uidBufPrint(&id_buf);
 
@@ -123,8 +157,8 @@ pub const Iskra = struct {
         }
 
         {
-            const issue_state = issue.Issue{
-                .state = .open,
+            const issue_state = issue.IssueState{
+                .status = .open,
             };
 
             var buffer: [1024]u8 = undefined;
