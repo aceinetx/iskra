@@ -10,9 +10,37 @@ const ArgsVector = []const [*:0]const u8;
 
 fn option_new(args: ArgsVector, iskra: *Iskra) void {
     _ = args;
-    iskra.new_issue() catch |e| {
+    iskra.issue_new() catch |e| {
         std.log.err("error creating new issue: {}", .{e});
     };
+}
+
+fn option_close(args: ArgsVector, iskra: *Iskra) void {
+    if (args.len <= 2) {
+        std.log.err("no id provided", .{});
+        return;
+    }
+
+    const id = std.mem.span(args.ptr[2]);
+    if (iskra.issue_close(id)) {
+        std.log.info("issue {s} closed", .{id});
+    } else |e| {
+        std.log.err("error closing the issue: {}", .{e});
+    }
+}
+
+fn option_open(args: ArgsVector, iskra: *Iskra) void {
+    if (args.len <= 2) {
+        std.log.err("no id provided", .{});
+        return;
+    }
+
+    const id = std.mem.span(args.ptr[2]);
+    if (iskra.issue_open(id)) {
+        std.log.info("issue {s} reopened", .{id});
+    } else |e| {
+        std.log.err("error opening the issue: {}", .{e});
+    }
 }
 
 const Option = struct {
@@ -24,6 +52,14 @@ const options: []const Option = &.{
     .{
         .name = "new",
         .func = option_new,
+    },
+    .{
+        .name = "close",
+        .func = option_close,
+    },
+    .{
+        .name = "open",
+        .func = option_open,
     },
 };
 
